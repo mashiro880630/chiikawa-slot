@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>吉伊卡哇幸運機台 App</title>
+    
+    <!-- PWA 與行動裝置優化 Meta Tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="吉伊機台">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#020617">
+    
+    <!-- 外部資源 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        @keyframes shimmer {
+            0% { transform: translateX(-100%) skewX(-12deg); }
+            100% { transform: translateX(200%) skewX(-12deg); }
+        }
+        body {
+            background-color: #020617;
+            /* 防止行動端長按彈出選單與雙擊縮放 */
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            overflow-x: hidden;
+        }
+        /* 隱藏滾動條 */
+        ::-webkit-scrollbar { display: none; }
+        
+        .slot-machine-container {
+            min-height: 100vh;
+            padding-bottom: env(safe-area-inset-bottom);
+            padding-top: env(safe-area-inset-top);
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // API Key (執行環境會自動提供)
+        const apiKey = ""; 
+
+        const SYMBOLS = [
+            { id: 1, emoji: '🌱', name: '除草', value: 5, weight: 43 },
+            { id: 2, emoji: '🥞', name: '熱鬆餅', value: 10, weight: 25 },
+            { id: 3, emoji: '💛', name: '兔兔', value: 15, weight: 15 },
+            { id: 4, emoji: '💙', name: '哈契瓦雷', value: 20, weight: 10 },
+            { id: 5, emoji: '💖', name: '吉伊卡哇', value: 30, weight: 5 },
+            { id: 6, emoji: '✨', name: '稀有', value: 50, weight: 5 },
+        ];
+
+        const MULTIPLIERS = [1, 2, 5, 10, 50, 100, 500, 1000];
+        const WIN_LINES = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+
+        function App() {
+            const [credits, setCredits] = useState(1000000);
+            const [goldAmount, setGoldAmount] = useState(0);
+            const [stockPrice, setStockPrice] = useState(100.00);
+            const [pnl, setPnl] = useState(0);
+            const [reels, setReels] = useState(Array(9).fill('❓'));
+            const [isSpinning, setIsSpinning] = useState(false);
+            const [aiAphorism, setAiAphorism] = useState("今天的努力，是為了明天的鬆餅！");
+            const [isAiLoading, setIsAiLoading] = useState(false);
+            const [aiFortune, setAiFortune] = useState("");
+            const [selectedMultiplier, setSelectedMultiplier] = useState(1);
+            const [spinningReels, setSpinningReels] = useState(Array(9).fill(false));
+            const [stoppedColumns, setStoppedColumns] = useState([false, false, false]);
+            const finalResultsRef = useRef(null);
+
+            // 指數退避 API 請求 (用於 Gemini API)
+            const fetchGemini = async (prompt, systemPrompt = "") => {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+                for (let i = 0; i < 5; i++) {
+                    try {
+                        const res = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: prompt }] }],
+                                systemInstruction: { parts: [{ text: systemPrompt }] }
+                            })
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            return data.candidates?.[0]?.content?.parts?.[0]?.text;
+                        }
+                    } catch (e) {}
+                    await new Promise(r => setTimeout(r, Math.pow(2, i) * 1000));
+                }
+                return null;
+            };
+
+            const askAiFortune = async () => {
+                setIsAiLoading(true);
+                const result = await fetchGemini(
+                    `資產:${credits}, 黃金:${goldAmount}, 盈虧:${pnl}`,
+                    "你是一位吉伊卡哇世界的占卜師，請用可愛的語氣給出短小的理財建議。"
+                );
+                setAiFortune(result || "（吉伊卡哇在睡覺...）");
+                setIsAiLoading(false);
+            };
+
+            // 隨機股市波動效果
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    setStockPrice(p => parseFloat(Math.max(1, p + (Math.random() - 0.5) * 1.5).toFixed(2)));
+                }, 3000);
+                return () => clearInterval(timer);
+            }, []);
+
+            const handleSpin = () => {
+                if (credits < 100 * selectedMultiplier || isSpinning) return;
+                setCredits(c => c - 100 * selectedMultiplier);
+                setIsSpinning(true);
+                setSpinningReels(Array(9).fill(true));
+                setStoppedColumns([false, false, false]);
+                finalResultsRef.current = Array(9).fill(null).map(() => {
+                    const total = SYMBOLS.reduce((a, s) => a + s.weight, 0);
+                    let r = Math.random() * total;
+                    for (const s of SYMBOLS) { if (r < s.weight) return s; r -= s.weight; }
+                    return SYMBOLS[0];
+                });
+            };
+
+            const handleStop = (col) => {
+                if (!isSpinning || stoppedColumns[col]) return;
+                const newStopped = [...stoppedColumns]; newStopped[col] = true;
+                setStoppedColumns(newStopped);
+                const newSpinning = [...spinningReels];
+                [col, col+3, col+6].forEach(i => newSpinning[i] = false);
+                setSpinningReels(newSpinning);
+                setReels(prev => {
+                    const nr = [...prev];
+                    [col, col+3, col+6].forEach(i => nr[i] = finalResultsRef.current[i].emoji);
+                    return nr;
+                });
+                if (newStopped.every(v => v)) {
+                    setIsSpinning(false);
+                    let m = 0;
+                    WIN_LINES.forEach(l => {
+                        if (finalResultsRef.current[l[0]].id === finalResultsRef.current[l[1]].id && 
+                            finalResultsRef.current[l[1]].id === finalResultsRef.current[l[2]].id) {
+                            m += finalResultsRef.current[l[0]].value * 20;
+                        }
+                    });
+                    if (m > 0) setCredits(c => c + (100 * selectedMultiplier * m));
+                }
+            };
+
+            return (
+                <div className="slot-machine-container flex flex-col items-center p-4 max-w-md mx-auto overflow-hidden">
+                    <header className="text-center mb-4 pt-2">
+                        <h1 className="text-3xl font-black text-pink-400 flex items-center justify-center gap-2 drop-shadow-md">
+                             吉伊機台 App
+                        </h1>
+                        <p className="text-cyan-300 text-xs mt-1 px-4 italic">"{aiAphorism}"</p>
+                    </header>
+
+                    {/* 拉霸機本體 */}
+                    <div className="w-full bg-gradient-to-b from-red-800 to-red-950 p-4 rounded-[2.5rem] border-4 border-yellow-500 shadow-[0_10px_50px_rgba(220,38,38,0.3)]">
+                        <div className="grid grid-cols-3 gap-2 mb-4 bg-slate-900/50 p-2 rounded-2xl">
+                            {reels.map((s, i) => (
+                                <div key={i} className={`aspect-square bg-white rounded-xl flex items-center justify-center text-4xl shadow-[inset_0_2px_10px_rgba(0,0,0,0.1)] transition-all duration-75 ${spinningReels[i] ? 'animate-pulse scale-95 opacity-80' : 'scale-100'}`}>
+                                    {s}
+                                </div>
+                            ))}
+                        </div>
+                        
+                        <div className="flex gap-2 mb-4">
+                            {[0,1,2].map(i => (
+                                <button 
+                                    key={i} 
+                                    onClick={() => handleStop(i)} 
+                                    disabled={!isSpinning || stoppedColumns[i]} 
+                                    className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-white shadow-lg disabled:opacity-30 active:scale-90 transition-transform text-sm"
+                                >
+                                    停止 {i+1}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="bg-black/60 p-3 rounded-2xl flex justify-between items-center text-sm mb-4 border border-white/5 backdrop-blur-sm">
+                            <div className="flex flex-col">
+                                <span className="text-[10px] text-slate-400 uppercase">Credits</span>
+                                <span className="text-yellow-400 font-mono font-bold">${credits.toLocaleString()}</span>
+                            </div>
+                            <div className="h-8 w-px bg-white/10"></div>
+                            <div className="flex flex-col text-right">
+                                <span className="text-[10px] text-slate-400 uppercase">Gold</span>
+                                <span className="text-cyan-400 font-mono font-bold">{goldAmount.toFixed(2)} 💎</span>
+                            </div>
+                        </div>
+
+                        <button 
+                            onClick={handleSpin} 
+                            disabled={isSpinning} 
+                            className="w-full py-5 bg-gradient-to-r from-red-500 via-pink-500 to-red-500 bg-[length:200%_auto] hover:bg-right rounded-2xl text-2xl font-black text-white shadow-[0_5px_20px_rgba(236,72,153,0.4)] active:scale-95 transition-all disabled:grayscale disabled:opacity-50"
+                        >
+                            {isSpinning ? "轉動中..." : "開始旋轉!"}
+                        </button>
+                    </div>
+
+                    {/* 下方功能區 */}
+                    <div className="w-full mt-6 space-y-4">
+                        <div className="bg-indigo-900/20 p-4 rounded-3xl border border-indigo-500/30 backdrop-blur-md">
+                            <div className="flex justify-between items-center mb-3">
+                                <div className="flex items-center gap-2">
+                                    <div className="w-2 h-2 bg-indigo-400 rounded-full animate-ping"></div>
+                                    <span className="font-bold text-indigo-300 text-sm">✨ AI 財運占卜</span>
+                                </div>
+                                <button 
+                                    onClick={askAiFortune} 
+                                    disabled={isAiLoading} 
+                                    className="text-[10px] bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 rounded-full text-white font-bold transition-all active:scale-90"
+                                >
+                                    {isAiLoading ? "解析中..." : "更新建議"}
+                                </button>
+                            </div>
+                            <div className="bg-slate-950/40 p-3 rounded-2xl border border-white/5">
+                                <p className="text-xs text-indigo-100/90 leading-relaxed italic">
+                                    {aiFortune || "點擊按鈕，吉伊卡哇將會告訴你今天的幸運秘訣..."}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="bg-emerald-900/20 p-4 rounded-3xl border border-emerald-500/30 flex justify-between items-center backdrop-blur-md">
+                            <div>
+                                <span className="text-[10px] text-emerald-500 font-black uppercase tracking-widest block">Live Market</span>
+                                <span className="font-bold text-emerald-400 text-sm">黃金即時行情</span>
+                            </div>
+                            <div className="text-right">
+                                <span className="font-mono text-2xl text-emerald-300 drop-shadow-[0_0_8px_rgba(110,231,183,0.5)]">${stockPrice.toFixed(2)}</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <footer className="mt-8 text-[10px] text-slate-500 text-center opacity-50">
+                        © 2024 吉伊卡哇幸運機台 · AI Powered
+                    </footer>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
